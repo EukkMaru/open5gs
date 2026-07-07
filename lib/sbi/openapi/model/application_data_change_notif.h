@@ -8,7 +8,7 @@
 #define _OpenAPI_application_data_change_notif_H_
 
 #include <string.h>
-#include "../external/cJSON.h"
+#include "external/cjson/cJSON.h"
 #include "../include/list.h"
 #include "../include/keyValuePair.h"
 #include "../include/binary.h"

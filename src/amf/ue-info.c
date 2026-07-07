@@ -113,7 +113,7 @@
 #include "amf-sm.h"
 #include "ue-info.h"
 
-#include "sbi/openapi/external/cJSON.h"
+#include "external/cjson/cJSON.h"
 #include "metrics/prometheus/json_pager.h"
 
 

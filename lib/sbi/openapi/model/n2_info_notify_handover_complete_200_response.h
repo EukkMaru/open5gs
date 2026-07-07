@@ -8,7 +8,7 @@
 #define _OpenAPI_n2_info_notify_handover_complete_200_response_H_
 
 #include <string.h>
-#include "../external/cJSON.h"
+#include "external/cjson/cJSON.h"
 #include "../include/list.h"
 #include "../include/keyValuePair.h"
 #include "../include/binary.h"

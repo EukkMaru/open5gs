@@ -66,7 +66,7 @@
 #include "mme-context.h"
 #include "enb-info.h"
 
-#include "sbi/openapi/external/cJSON.h"
+#include "external/cjson/cJSON.h"
 #include "metrics/prometheus/json_pager.h"
 
 #ifndef ENB_INFO_PAGE_SIZE_DEFAULT

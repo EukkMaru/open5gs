@@ -8,7 +8,7 @@
 #define _OpenAPI_pp_subs_reg_timer_H_
 
 #include <string.h>
-#include "../external/cJSON.h"
+#include "external/cjson/cJSON.h"
 #include "../include/list.h"
 #include "../include/keyValuePair.h"
 #include "../include/binary.h"

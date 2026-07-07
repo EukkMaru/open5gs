@@ -8,7 +8,7 @@
 #define _OpenAPILinksH_
 
 #include <string.h>
-#include "../openapi/external/cJSON.h"
+#include "external/cjson/cJSON.h"
 #include "../openapi/include/list.h"
 #include "../openapi/include/keyValuePair.h"
 
