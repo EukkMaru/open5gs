@@ -173,6 +173,7 @@ ogs_sbi_request_t *smf_nudm_sdm_build_subscription(
     uint64_t supported_features = 0;
 
     char *monres = NULL;
+    char *fallback_dnn = NULL;
 
     ogs_assert(sess);
     ogs_assert(data);
@@ -231,7 +232,14 @@ ogs_sbi_request_t *smf_nudm_sdm_build_subscription(
     SDMSubscription.is_unique_subscription = true;
     SDMSubscription.unique_subscription = 1;
 
-    SDMSubscription.dnn = sess->session.name;
+    if (sess->session.name) {
+        SDMSubscription.dnn = sess->session.name;
+    } else {
+        fallback_dnn = ogs_strdup("internet");
+        ogs_assert(fallback_dnn);
+        SDMSubscription.dnn = fallback_dnn;
+    }
+
     SDMSubscription.plmn_id = ogs_sbi_build_plmn_id(&sess->serving_plmn_id);
 
     sNSSAI.sst = sess->s_nssai.sst;
@@ -252,6 +260,8 @@ end:
         ogs_free(SDMSubscription.supported_features);
     if (monres)
         ogs_free(monres);
+    if (fallback_dnn)
+        ogs_free(fallback_dnn);
     OpenAPI_list_free(SDMSubscription.monitored_resource_uris);
     if (SDMSubscription.callback_reference)
         ogs_free(SDMSubscription.callback_reference);
