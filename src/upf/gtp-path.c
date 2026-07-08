@@ -99,6 +99,160 @@ static uint16_t _get_eth_type(uint8_t *data, uint len) {
     return 0;
 }
 
+#define ETH_MAC_IS_MULTICAST(mac) ((mac)[0] & 0x01)
+
+/* Find the downlink PDR of an Ethernet PDU session.
+ *
+ * Same selection as the IP datapath, except SDF rule matching is
+ * skipped: ogs_pfcp_pdr_rule_find_by_packet() parses the payload
+ * as an IP header, which a raw Ethernet frame is not. */
+static ogs_pfcp_pdr_t *upf_eth_dl_pdr(upf_sess_t *sess)
+{
+    ogs_pfcp_pdr_t *pdr = NULL;
+    ogs_pfcp_pdr_t *fallback_pdr = NULL;
+    ogs_pfcp_far_t *far = NULL;
+
+    ogs_assert(sess);
+
+    ogs_list_for_each(&sess->pfcp.pdr_list, pdr) {
+        far = pdr->far;
+        ogs_assert(far);
+
+        /* Check if PDR is Downlink */
+        if (pdr->src_if != OGS_PFCP_INTERFACE_CORE)
+            continue;
+
+        /* Save the Fallback PDR : Lowest precedence downlink PDR */
+        fallback_pdr = pdr;
+
+        /* Check if FAR is Downlink */
+        if (far->dst_if != OGS_PFCP_INTERFACE_ACCESS)
+            continue;
+
+        /* Check if Outer header creation */
+        if (far->outer_header_creation.ip4 == 0 &&
+            far->outer_header_creation.ip6 == 0 &&
+            far->outer_header_creation.udp4 == 0 &&
+            far->outer_header_creation.udp6 == 0 &&
+            far->outer_header_creation.gtpu4 == 0 &&
+            far->outer_header_creation.gtpu6 == 0)
+            continue;
+
+        break;
+    }
+
+    return pdr ? pdr : fallback_pdr;
+}
+
+/* Forward a raw Ethernet frame toward the UE of an Ethernet PDU session.
+ *
+ * Returns true if pkbuf was consumed (forwarded, buffered or freed by
+ * ogs_pfcp_up_handle_pdr); false if no downlink PDR was found and the
+ * caller must free pkbuf. */
+static bool upf_eth_send_to_sess(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
+{
+    ogs_pfcp_pdr_t *pdr = NULL;
+    ogs_pfcp_user_plane_report_t report;
+    int i;
+
+    ogs_assert(sess);
+    ogs_assert(pkbuf);
+
+    pdr = upf_eth_dl_pdr(sess);
+    if (!pdr)
+        return false;
+
+    /* Increment total & dl octets + pkts */
+    for (i = 0; i < pdr->num_of_urr; i++)
+        upf_sess_urr_acc_add(sess, pdr->urr[i], pkbuf->len, false);
+
+    ogs_assert(true == ogs_pfcp_up_handle_pdr(
+                pdr, OGS_GTPU_MSGTYPE_GPDU, 0, NULL, pkbuf, &report));
+
+    if (report.type.downlink_data_report) {
+        report.downlink_data.pdr_id = pdr->id;
+        if (pdr->qer && pdr->qer->qfi)
+            report.downlink_data.qfi = pdr->qer->qfi; /* for 5GC */
+
+        ogs_assert(OGS_OK ==
+            upf_pfcp_send_session_report_request(sess, &report));
+    }
+
+    return true;
+}
+
+/* Uplink for Ethernet PDU sessions: bridge a raw Ethernet frame
+ * received over GTP-U out the TAP device (or hairpin/flood it to
+ * other Ethernet UEs). Always consumes pkbuf.
+ *
+ * No proxy-MAC rewrite and no header strip: the frame is emitted
+ * unchanged so the UE's real MAC stays visible on the bridge. */
+static void upf_eth_recv_from_access(
+        upf_sess_t *sess, ogs_pfcp_pdr_t *pdr, ogs_pkbuf_t *pkbuf)
+{
+    struct ether_header *eth_h = NULL;
+    upf_sess_t *eth_sess = NULL;
+    int i;
+
+    ogs_assert(sess);
+    ogs_assert(pdr);
+    ogs_assert(pkbuf);
+
+    if (pkbuf->len < ETHER_HDR_LEN) {
+        ogs_error("[DROP] Short Ethernet frame [len:%d]", pkbuf->len);
+        ogs_log_hexdump(OGS_LOG_ERROR, pkbuf->data, pkbuf->len);
+        ogs_pkbuf_free(pkbuf);
+        return;
+    }
+
+    if (!sess->eth_dev) {
+        /* Set at session establishment; cannot happen */
+        ogs_error("[DROP] Ethernet session APN[%s] has no TAP device",
+                sess->apn_dnn ? sess->apn_dnn : "");
+        ogs_pkbuf_free(pkbuf);
+        return;
+    }
+
+    eth_h = (struct ether_header *)pkbuf->data;
+
+    /* Learn the UE's source MAC for downlink L2 switching */
+    if (!ETH_MAC_IS_MULTICAST(eth_h->ether_shost))
+        upf_sess_eth_mac_learn(sess, eth_h->ether_shost);
+
+    /* Increment total & ul octets + pkts */
+    for (i = 0; i < pdr->num_of_urr; i++)
+        upf_sess_urr_acc_add(sess, pdr->urr[i], pkbuf->len, true);
+
+    if (ETH_MAC_IS_MULTICAST(eth_h->ether_dhost)) {
+        /* Broadcast/multicast: copy to the other Ethernet UEs, then
+         * still emit on the TAP so the bridge floods it toward N6 */
+        ogs_list_for_each(&upf_self()->sess_list, eth_sess) {
+            ogs_pkbuf_t *sendbuf = NULL;
+
+            if (eth_sess->ethernet == false || eth_sess == sess)
+                continue;
+
+            sendbuf = ogs_pkbuf_copy(pkbuf);
+            ogs_assert(sendbuf);
+            if (upf_eth_send_to_sess(eth_sess, sendbuf) == false)
+                ogs_pkbuf_free(sendbuf);
+        }
+    } else {
+        /* Unicast to another UE of this UPF: hairpin */
+        eth_sess = upf_sess_find_by_eth_mac(eth_h->ether_dhost);
+        if (eth_sess && eth_sess != sess) {
+            if (upf_eth_send_to_sess(eth_sess, pkbuf) == false)
+                ogs_pkbuf_free(pkbuf);
+            return;
+        }
+    }
+
+    if (ogs_tun_write(sess->eth_dev->fd, pkbuf) != OGS_OK)
+        ogs_warn("ogs_tun_write() failed for Ethernet session");
+
+    ogs_pkbuf_free(pkbuf);
+}
+
 static void _gtpv1_tun_recv_common_cb(
         short when, ogs_socket_t fd, bool has_eth, void *data)
 {
@@ -121,6 +275,51 @@ static void _gtpv1_tun_recv_common_cb(
         ogs_pkbuf_t *replybuf = NULL;
         uint16_t eth_type = _get_eth_type(recvbuf->data, recvbuf->len);
         uint8_t size;
+
+        /*
+         * Ethernet PDU sessions: L2 switching on the destination MAC.
+         *
+         * This must run before the proxy-ARP/ND handling below, which
+         * answers (or drops) on behalf of IP PDN sessions only and
+         * would otherwise eat frames destined for Ethernet UEs.
+         */
+        if (recvbuf->len >= ETHER_HDR_LEN) {
+            struct ether_header *eth_h =
+                (struct ether_header *)recvbuf->data;
+
+            if (ETH_MAC_IS_MULTICAST(eth_h->ether_dhost)) {
+                /* Broadcast/multicast: flood a copy to every Ethernet
+                 * session (this is what lets ARP reach the UE), then
+                 * fall through so IP PDN sessions still get their
+                 * proxy-ARP/ND service. */
+                upf_sess_t *eth_sess = NULL;
+
+                ogs_list_for_each(&upf_self()->sess_list, eth_sess) {
+                    ogs_pkbuf_t *sendbuf = NULL;
+
+                    if (eth_sess->ethernet == false)
+                        continue;
+
+                    sendbuf = ogs_pkbuf_copy(recvbuf);
+                    ogs_assert(sendbuf);
+                    if (upf_eth_send_to_sess(eth_sess, sendbuf) == false)
+                        ogs_pkbuf_free(sendbuf);
+                }
+            } else {
+                /* Unicast to a learned UE MAC: forward the full frame,
+                 * no ETHER_HDR_LEN strip. Unknown unicast (e.g. to the
+                 * proxy MAC of an IP PDN session) falls through to the
+                 * legacy path below. */
+                upf_sess_t *eth_sess =
+                    upf_sess_find_by_eth_mac(eth_h->ether_dhost);
+
+                if (eth_sess) {
+                    if (upf_eth_send_to_sess(eth_sess, recvbuf) == false)
+                        goto cleanup;
+                    return;
+                }
+            }
+        }
 
         if (eth_type == ETHERTYPE_ARP) {
             if (is_arp_req(recvbuf->data, recvbuf->len) &&
@@ -438,6 +637,9 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
             pfcp_sess = (ogs_pfcp_sess_t *)pfcp_object;
             ogs_assert(pfcp_sess);
 
+            sess = UPF_SESS(pfcp_sess);
+            ogs_assert(sess);
+
             ogs_list_for_each(&pfcp_sess->pdr_list, pdr) {
 
                 /*
@@ -466,8 +668,18 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                 if (pdr->qfi && pdr->qfi != header_desc.qos_flow_identifier)
                     continue;
 
-                /* Check if Rule List in PDR */
-                if (ogs_list_first(&pdr->rule_list) &&
+                /* Check if Rule List in PDR
+                 *
+                 * Ethernet PDU sessions: SDF filters are IP-based and
+                 * can never match a raw Ethernet frame, so any PDR
+                 * carrying rules is skipped outright -- without calling
+                 * ogs_pfcp_pdr_rule_find_by_packet(), which would
+                 * misparse the frame as an IP header. Selection falls
+                 * through to the session's rule-less default PDR. */
+                if (sess->ethernet) {
+                    if (ogs_list_first(&pdr->rule_list))
+                        continue;
+                } else if (ogs_list_first(&pdr->rule_list) &&
                     ogs_pfcp_pdr_rule_find_by_packet(pdr, pkbuf) == NULL)
                     continue;
 
@@ -582,8 +794,13 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
          *
          * This is because IP source spoofing checks are performed only
          * in such cases.
+         *
+         * Ethernet PDU sessions carry raw Ethernet frames, not IP
+         * packets, so the IP version/spoofing validation is skipped;
+         * they are bridged at L2 below instead.
          */
-        if (pdr->src_if == OGS_PFCP_INTERFACE_ACCESS &&
+        if (sess->ethernet == false &&
+            pdr->src_if == OGS_PFCP_INTERFACE_ACCESS &&
             pdr->src_if_type_presence == true &&
             (pdr->src_if_type == OGS_PFCP_3GPP_INTERFACE_TYPE_N3_3GPP_ACCESS ||
              pdr->src_if_type == OGS_PFCP_3GPP_INTERFACE_TYPE_N9_FOR_ROAMING)) {
@@ -697,6 +914,17 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
                 goto cleanup;
             }
 
+        }
+
+        /*
+         * Ethernet PDU session: the inner payload is a raw Ethernet
+         * frame. Bridge it at L2 (TAP device / other Ethernet UEs)
+         * instead of the IP datapath below.
+         */
+        if (sess->ethernet && far->dst_if == OGS_PFCP_INTERFACE_CORE) {
+            /* pkbuf is consumed (forwarded, buffered or freed) */
+            upf_eth_recv_from_access(sess, pdr, pkbuf);
+            return;
         }
 
         if (far->dst_if == OGS_PFCP_INTERFACE_CORE &&

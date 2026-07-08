@@ -120,6 +120,34 @@ void upf_n4_handle_session_establishment_request(
         ogs_assert(sess->apn_dnn);
     }
 
+    /*
+     * Ethernet PDU session (PDN Type = Ethernet):
+     * no UE IP address is assigned (pdr->ue_ip_addr_len == 0, so
+     * upf_sess_set_ue_ip() is never reached). The user plane bridges
+     * raw L2 frames between GTP-U and the first TAP device instead.
+     */
+    if (req->pdn_type.presence == 1 &&
+        req->pdn_type.u8 == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        ogs_pfcp_dev_t *dev = NULL;
+
+        ogs_list_for_each(&ogs_pfcp_self()->dev_list, dev) {
+            if (dev->is_tap)
+                break;
+        }
+        if (!dev) {
+            ogs_error("Ethernet PDN type APN[%s] but no TAP device "
+                    "configured (session.dev must contain \"tap\")",
+                    sess->apn_dnn ? sess->apn_dnn : "");
+            cause_value = OGS_PFCP_CAUSE_SERVICE_NOT_SUPPORTED;
+            goto cleanup;
+        }
+
+        sess->ethernet = true;
+        sess->eth_dev = dev;
+        ogs_info("Ethernet PDU session APN[%s] bridged via dev[%s]",
+                sess->apn_dnn ? sess->apn_dnn : "", dev->ifname);
+    }
+
     for (i = 0; i < OGS_MAX_NUM_OF_QER; i++) {
         if (ogs_pfcp_handle_create_qer(&sess->pfcp, &req->create_qer[i],
                     &cause_value, &offending_ie_value) == NULL)

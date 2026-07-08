@@ -20,6 +20,10 @@
 #include "context.h"
 #include "pfcp-path.h"
 
+#ifdef HAVE_NET_ETHERNET_H
+#include <net/ethernet.h>
+#endif
+
 static upf_context_t self;
 
 int __upf_log_domain;
@@ -63,6 +67,8 @@ void upf_context_init(void)
     ogs_assert(self.ipv4_hash);
     self.ipv6_hash = ogs_hash_make();
     ogs_assert(self.ipv6_hash);
+    self.eth_mac_hash = ogs_hash_make();
+    ogs_assert(self.eth_mac_hash);
 
     context_initialized = 1;
 }
@@ -92,6 +98,8 @@ void upf_context_final(void)
     ogs_hash_destroy(self.ipv4_hash);
     ogs_assert(self.ipv6_hash);
     ogs_hash_destroy(self.ipv6_hash);
+    ogs_assert(self.eth_mac_hash);
+    ogs_hash_destroy(self.eth_mac_hash);
 
     free_upf_route_trie_node(self.ipv4_framed_routes);
     free_upf_route_trie_node(self.ipv6_framed_routes);
@@ -241,6 +249,11 @@ int upf_sess_remove(upf_sess_t *sess)
                 sess->ipv6->addr, OGS_IPV6_DEFAULT_PREFIX_LEN >> 3, NULL);
         ogs_pfcp_ue_ip_free(sess->ipv6);
     }
+    if (sess->eth_mac_learned) {
+        ogs_hash_set(self.eth_mac_hash,
+                sess->eth_mac, ETHER_ADDR_LEN, NULL);
+        sess->eth_mac_learned = false;
+    }
 
     upf_sess_set_ue_ipv4_framed_routes(sess, NULL);
     upf_sess_set_ue_ipv6_framed_routes(sess, NULL);
@@ -354,6 +367,50 @@ upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6)
             trie = trie->left;
     }
     return ret;
+}
+
+upf_sess_t *upf_sess_find_by_eth_mac(const uint8_t *mac)
+{
+    ogs_assert(self.eth_mac_hash);
+    ogs_assert(mac);
+
+    return ogs_hash_get(self.eth_mac_hash, mac, ETHER_ADDR_LEN);
+}
+
+void upf_sess_eth_mac_learn(upf_sess_t *sess, const uint8_t *mac)
+{
+    upf_sess_t *other = NULL;
+
+    ogs_assert(self.eth_mac_hash);
+    ogs_assert(sess);
+    ogs_assert(mac);
+
+    if (sess->eth_mac_learned &&
+        memcmp(sess->eth_mac, mac, ETHER_ADDR_LEN) == 0)
+        return;
+
+    /* If another session claimed this MAC, it moved to us; unmap it */
+    other = upf_sess_find_by_eth_mac(mac);
+    if (other && other != sess) {
+        ogs_hash_set(self.eth_mac_hash,
+                other->eth_mac, ETHER_ADDR_LEN, NULL);
+        other->eth_mac_learned = false;
+    }
+
+    /* Unmap our previous MAC before overwriting the key storage */
+    if (sess->eth_mac_learned)
+        ogs_hash_set(self.eth_mac_hash,
+                sess->eth_mac, ETHER_ADDR_LEN, NULL);
+
+    memcpy(sess->eth_mac, mac, ETHER_ADDR_LEN);
+    ogs_hash_set(self.eth_mac_hash,
+            sess->eth_mac, ETHER_ADDR_LEN, sess);
+    sess->eth_mac_learned = true;
+
+    ogs_info("UE MAC [%02x:%02x:%02x:%02x:%02x:%02x] learned "
+            "for Ethernet session APN[%s]",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            sess->apn_dnn ? sess->apn_dnn : "");
 }
 
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id)

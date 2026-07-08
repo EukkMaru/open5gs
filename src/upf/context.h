@@ -53,6 +53,7 @@ typedef struct upf_context_s {
     ogs_hash_t *smf_n4_f_seid_hash; /* hash table (SMF-N4-F-SEID) */
     ogs_hash_t *ipv4_hash;  /* hash table (IPv4 Address) */
     ogs_hash_t *ipv6_hash;  /* hash table (IPv6 Address) */
+    ogs_hash_t *eth_mac_hash;   /* hash table (UE MAC, Ethernet PDU) */
 
     /* IPv4 framed routes trie */
     struct upf_route_trie_node *ipv4_framed_routes;
@@ -115,6 +116,13 @@ typedef struct upf_sess_s {
     ogs_pfcp_ue_ip_t *ipv4;
     ogs_pfcp_ue_ip_t *ipv6;
 
+    /* Ethernet PDU session (5GS PDU session type 5):
+     * no UE IP address; raw L2 bridging between GTP-U and a TAP device */
+    bool            ethernet;
+    ogs_pfcp_dev_t  *eth_dev;       /* TAP device used for bridging */
+    uint8_t         eth_mac[6];     /* learned UE MAC (eth_mac_hash key) */
+    bool            eth_mac_learned;
+
     ogs_ipsubnet_t   *ipv4_framed_routes;
     ogs_ipsubnet_t   *ipv6_framed_routes;
 
@@ -142,6 +150,8 @@ upf_sess_t *upf_sess_find_by_smf_n4_f_seid(ogs_pfcp_f_seid_t *f_seid);
 upf_sess_t *upf_sess_find_by_upf_n4_seid(uint64_t seid);
 upf_sess_t *upf_sess_find_by_ipv4(uint32_t addr);
 upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6);
+upf_sess_t *upf_sess_find_by_eth_mac(const uint8_t *mac);
+void upf_sess_eth_mac_learn(upf_sess_t *sess, const uint8_t *mac);
 upf_sess_t *upf_sess_find_by_id(ogs_pool_id_t id);
 
 uint8_t upf_sess_set_ue_ip(upf_sess_t *sess,
