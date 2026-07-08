@@ -953,11 +953,23 @@ bool udr_nudr_dr_handle_subscription_provisioned(
                     OpenAPI_list_add(pduSessionTypeList->allowed_session_types,
                             (void *)OpenAPI_pdu_session_type_IPV4V6);
                     break;
+                case OpenAPI_pdu_session_type_ETHERNET:
+                    OpenAPI_list_add(pduSessionTypeList->allowed_session_types,
+                            (void *)OpenAPI_pdu_session_type_ETHERNET);
+                    break;
                 default:
                     ogs_fatal("Unsupported PDN_TYPE[%d]",
                             pduSessionTypeList->default_session_type);
                     ogs_assert_if_reached();
                 }
+
+                /* Ethernet PDU support: always advertise ETHERNET as an
+                 * allowed session type so a UE can request it even when
+                 * the subscribed default type is IPv4/IPv6/IPv4v6 */
+                if (pduSessionTypeList->default_session_type !=
+                        OpenAPI_pdu_session_type_ETHERNET)
+                    OpenAPI_list_add(pduSessionTypeList->allowed_session_types,
+                            (void *)OpenAPI_pdu_session_type_ETHERNET);
 
                 dnnConfiguration->pdu_session_types = pduSessionTypeList;
 
