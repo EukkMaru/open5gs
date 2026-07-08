@@ -213,6 +213,15 @@ bool pcf_nudr_dr_handle_query_sm_data(
             goto cleanup;
         }
 
+        if (!sess->ipv4addr_string && !sess->ipv6prefix_string) {
+            /* Ethernet PDU session: a PcfBinding requires a UE IP address
+             * or MAC address (TS 29.521) and neither is known at session
+             * creation - skip BSF registration and respond directly */
+            ogs_expect(true ==
+                pcf_sbi_send_smpolicycontrol_create_response(sess, stream));
+            return true;
+        }
+
         r = pcf_sess_sbi_discover_and_send(
                     OpenAPI_service_name_nbsf_management, NULL,
                     pcf_nbsf_management_build_register,

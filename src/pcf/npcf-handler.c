@@ -320,7 +320,10 @@ bool pcf_npcf_smpolicycontrol_handle_create(pcf_sess_t *sess,
     }
 
     if (!SmPolicyContextData->ipv4_address &&
-        !SmPolicyContextData->ipv6_address_prefix) {
+        !SmPolicyContextData->ipv6_address_prefix &&
+        SmPolicyContextData->pdu_session_type !=
+            OpenAPI_pdu_session_type_ETHERNET) {
+        /* An Ethernet PDU session has no UE IP address */
         strerror = ogs_msprintf("[%s:%d] No IPv4 address or IPv6 prefix",
                 pcf_ue_sm->supi, sess->psi);
         status = OGS_SBI_HTTP_STATUS_BAD_REQUEST;
