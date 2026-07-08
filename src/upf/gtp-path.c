@@ -181,6 +181,29 @@ static bool upf_eth_send_to_sess(upf_sess_t *sess, ogs_pkbuf_t *pkbuf)
     return true;
 }
 
+/* Copy a raw Ethernet frame to every Ethernet PDU session except skip
+ * (802.1D flood-and-learn; skip is the ingress session, or NULL when
+ * the frame came from the data network). pkbuf itself is not consumed:
+ * only copies are forwarded. */
+static void upf_eth_flood(ogs_pkbuf_t *pkbuf, upf_sess_t *skip)
+{
+    upf_sess_t *eth_sess = NULL;
+
+    ogs_assert(pkbuf);
+
+    ogs_list_for_each(&upf_self()->sess_list, eth_sess) {
+        ogs_pkbuf_t *sendbuf = NULL;
+
+        if (eth_sess->ethernet == false || eth_sess == skip)
+            continue;
+
+        sendbuf = ogs_pkbuf_copy(pkbuf);
+        ogs_assert(sendbuf);
+        if (upf_eth_send_to_sess(eth_sess, sendbuf) == false)
+            ogs_pkbuf_free(sendbuf);
+    }
+}
+
 /* Uplink for Ethernet PDU sessions: bridge a raw Ethernet frame
  * received over GTP-U out the TAP device (or hairpin/flood it to
  * other Ethernet UEs). Always consumes pkbuf.
@@ -226,17 +249,7 @@ static void upf_eth_recv_from_access(
     if (ETH_MAC_IS_MULTICAST(eth_h->ether_dhost)) {
         /* Broadcast/multicast: copy to the other Ethernet UEs, then
          * still emit on the TAP so the bridge floods it toward N6 */
-        ogs_list_for_each(&upf_self()->sess_list, eth_sess) {
-            ogs_pkbuf_t *sendbuf = NULL;
-
-            if (eth_sess->ethernet == false || eth_sess == sess)
-                continue;
-
-            sendbuf = ogs_pkbuf_copy(pkbuf);
-            ogs_assert(sendbuf);
-            if (upf_eth_send_to_sess(eth_sess, sendbuf) == false)
-                ogs_pkbuf_free(sendbuf);
-        }
+        upf_eth_flood(pkbuf, sess);
     } else {
         /* Unicast to another UE of this UPF: hairpin */
         eth_sess = upf_sess_find_by_eth_mac(eth_h->ether_dhost);
@@ -292,24 +305,10 @@ static void _gtpv1_tun_recv_common_cb(
                  * session (this is what lets ARP reach the UE), then
                  * fall through so IP PDN sessions still get their
                  * proxy-ARP/ND service. */
-                upf_sess_t *eth_sess = NULL;
-
-                ogs_list_for_each(&upf_self()->sess_list, eth_sess) {
-                    ogs_pkbuf_t *sendbuf = NULL;
-
-                    if (eth_sess->ethernet == false)
-                        continue;
-
-                    sendbuf = ogs_pkbuf_copy(recvbuf);
-                    ogs_assert(sendbuf);
-                    if (upf_eth_send_to_sess(eth_sess, sendbuf) == false)
-                        ogs_pkbuf_free(sendbuf);
-                }
+                upf_eth_flood(recvbuf, NULL);
             } else {
-                /* Unicast to a learned UE MAC: forward the full frame,
-                 * no ETHER_HDR_LEN strip. Unknown unicast (e.g. to the
-                 * proxy MAC of an IP PDN session) falls through to the
-                 * legacy path below. */
+                /* Unicast to a learned device MAC: forward the full
+                 * frame, no ETHER_HDR_LEN strip. */
                 upf_sess_t *eth_sess =
                     upf_sess_find_by_eth_mac(eth_h->ether_dhost);
 
@@ -317,6 +316,21 @@ static void _gtpv1_tun_recv_common_cb(
                     if (upf_eth_send_to_sess(eth_sess, recvbuf) == false)
                         goto cleanup;
                     return;
+                }
+
+                /* Unknown unicast: flood to all Ethernet sessions
+                 * (802.1D flood-and-learn) -- the destination may be a
+                 * device that has not transmitted yet, or a peer may
+                 * hold a valid ARP entry from before the UE
+                 * re-attached. Frames for the proxy MAC belong to IP
+                 * PDN sessions and take the legacy path below instead.
+                 * A production implementation would narrow this with
+                 * SMF-provisioned Ethernet Packet Filters (TS 29.244).
+                 */
+                if (memcmp(eth_h->ether_dhost, proxy_mac_addr,
+                        ETHER_ADDR_LEN) != 0) {
+                    upf_eth_flood(recvbuf, NULL);
+                    goto cleanup;
                 }
             }
         }

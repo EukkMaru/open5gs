@@ -30,6 +30,7 @@ int __upf_log_domain;
 
 static OGS_POOL(upf_sess_pool, upf_sess_t);
 static OGS_POOL(upf_n4_seid_pool, ogs_pool_id_t);
+static OGS_POOL(upf_eth_mac_pool, upf_eth_mac_t);
 
 static int context_initialized = 0;
 
@@ -55,6 +56,8 @@ void upf_context_init(void)
     ogs_list_init(&self.sess_list);
     ogs_pool_init(&upf_sess_pool, ogs_app()->pool.sess);
     ogs_pool_init(&upf_n4_seid_pool, ogs_app()->pool.sess);
+    ogs_pool_init(&upf_eth_mac_pool,
+            ogs_app()->pool.sess * UPF_MAX_NUM_OF_ETH_MAC);
     ogs_pool_random_id_generate(&upf_n4_seid_pool);
 
     self.upf_n4_seid_hash = ogs_hash_make();
@@ -106,6 +109,7 @@ void upf_context_final(void)
 
     ogs_pool_final(&upf_sess_pool);
     ogs_pool_final(&upf_n4_seid_pool);
+    ogs_pool_final(&upf_eth_mac_pool);
 
     context_initialized = 0;
 }
@@ -223,6 +227,19 @@ upf_sess_t *upf_sess_add(ogs_pfcp_f_seid_t *cp_f_seid)
     return sess;
 }
 
+static void upf_sess_eth_mac_clear(upf_sess_t *sess)
+{
+    upf_eth_mac_t *entry = NULL, *next_entry = NULL;
+
+    ogs_assert(sess);
+
+    ogs_list_for_each_safe(&sess->eth_mac_list, next_entry, entry) {
+        ogs_list_remove(&sess->eth_mac_list, entry);
+        ogs_hash_set(self.eth_mac_hash, entry->mac, ETHER_ADDR_LEN, NULL);
+        ogs_pool_free(&upf_eth_mac_pool, entry);
+    }
+}
+
 int upf_sess_remove(upf_sess_t *sess)
 {
     ogs_assert(sess);
@@ -249,11 +266,7 @@ int upf_sess_remove(upf_sess_t *sess)
                 sess->ipv6->addr, OGS_IPV6_DEFAULT_PREFIX_LEN >> 3, NULL);
         ogs_pfcp_ue_ip_free(sess->ipv6);
     }
-    if (sess->eth_mac_learned) {
-        ogs_hash_set(self.eth_mac_hash,
-                sess->eth_mac, ETHER_ADDR_LEN, NULL);
-        sess->eth_mac_learned = false;
-    }
+    upf_sess_eth_mac_clear(sess);
 
     upf_sess_set_ue_ipv4_framed_routes(sess, NULL);
     upf_sess_set_ue_ipv6_framed_routes(sess, NULL);
@@ -371,42 +384,68 @@ upf_sess_t *upf_sess_find_by_ipv6(uint32_t *addr6)
 
 upf_sess_t *upf_sess_find_by_eth_mac(const uint8_t *mac)
 {
+    upf_eth_mac_t *entry = NULL;
+
     ogs_assert(self.eth_mac_hash);
     ogs_assert(mac);
 
-    return ogs_hash_get(self.eth_mac_hash, mac, ETHER_ADDR_LEN);
+    entry = ogs_hash_get(self.eth_mac_hash, mac, ETHER_ADDR_LEN);
+
+    return entry ? entry->sess : NULL;
 }
 
 void upf_sess_eth_mac_learn(upf_sess_t *sess, const uint8_t *mac)
 {
-    upf_sess_t *other = NULL;
+    upf_eth_mac_t *entry = NULL;
 
     ogs_assert(self.eth_mac_hash);
     ogs_assert(sess);
     ogs_assert(mac);
 
-    if (sess->eth_mac_learned &&
-        memcmp(sess->eth_mac, mac, ETHER_ADDR_LEN) == 0)
-        return;
+    entry = ogs_hash_get(self.eth_mac_hash, mac, ETHER_ADDR_LEN);
+    if (entry) {
+        if (entry->sess == sess)
+            return;
 
-    /* If another session claimed this MAC, it moved to us; unmap it */
-    other = upf_sess_find_by_eth_mac(mac);
-    if (other && other != sess) {
-        ogs_hash_set(self.eth_mac_hash,
-                other->eth_mac, ETHER_ADDR_LEN, NULL);
-        other->eth_mac_learned = false;
+        /* Station move: the device now appears behind another session.
+         * The hash key/value stay valid; only the owner changes. */
+        ogs_list_remove(&entry->sess->eth_mac_list, entry);
+        entry->sess = sess;
+        ogs_list_add(&sess->eth_mac_list, entry);
+
+        ogs_info("UE MAC [%02x:%02x:%02x:%02x:%02x:%02x] moved "
+                "to Ethernet session APN[%s]",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                sess->apn_dnn ? sess->apn_dnn : "");
+        return;
     }
 
-    /* Unmap our previous MAC before overwriting the key storage */
-    if (sess->eth_mac_learned)
-        ogs_hash_set(self.eth_mac_hash,
-                sess->eth_mac, ETHER_ADDR_LEN, NULL);
+    if (ogs_list_count(&sess->eth_mac_list) >= UPF_MAX_NUM_OF_ETH_MAC) {
+        ogs_warn("Cannot learn UE MAC "
+                "[%02x:%02x:%02x:%02x:%02x:%02x]: Ethernet session "
+                "APN[%s] already has %d",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                sess->apn_dnn ? sess->apn_dnn : "",
+                UPF_MAX_NUM_OF_ETH_MAC);
+        return;
+    }
 
-    memcpy(sess->eth_mac, mac, ETHER_ADDR_LEN);
-    ogs_hash_set(self.eth_mac_hash,
-            sess->eth_mac, ETHER_ADDR_LEN, sess);
-    sess->eth_mac_learned = true;
+    ogs_pool_alloc(&upf_eth_mac_pool, &entry);
+    if (!entry) {
+        ogs_error("Maximum number of learned MAC addresses reached");
+        return;
+    }
+    memset(entry, 0, sizeof *entry);
 
+    memcpy(entry->mac, mac, ETHER_ADDR_LEN);
+    entry->sess = sess;
+    ogs_list_add(&sess->eth_mac_list, entry);
+    ogs_hash_set(self.eth_mac_hash, entry->mac, ETHER_ADDR_LEN, entry);
+
+    /*
+     * A production implementation would report this to the SMF here
+     * (TS 29.244 Ethernet Traffic Information: MAC Addresses Detected).
+     */
     ogs_info("UE MAC [%02x:%02x:%02x:%02x:%02x:%02x] learned "
             "for Ethernet session APN[%s]",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],

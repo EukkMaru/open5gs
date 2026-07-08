@@ -70,6 +70,19 @@ struct upf_route_trie_node {
     upf_sess_t *sess;
 };
 
+/* A device MAC address learned on an Ethernet PDU session.
+ *
+ * One session may serve several devices (5G-LAN: a LAN behind the UE),
+ * so MACs are kept as a per-session list. The mac[] array is also the
+ * key storage for upf_context_t.eth_mac_hash. */
+#define UPF_MAX_NUM_OF_ETH_MAC 16
+
+typedef struct upf_eth_mac_s {
+    ogs_lnode_t     lnode;      /* member of upf_sess_t.eth_mac_list */
+    uint8_t         mac[6];     /* key storage for eth_mac_hash */
+    upf_sess_t      *sess;
+} upf_eth_mac_t;
+
 /* Accounting: */
 typedef struct upf_sess_urr_acc_s {
     bool reporting_enabled;
@@ -120,8 +133,7 @@ typedef struct upf_sess_s {
      * no UE IP address; raw L2 bridging between GTP-U and a TAP device */
     bool            ethernet;
     ogs_pfcp_dev_t  *eth_dev;       /* TAP device used for bridging */
-    uint8_t         eth_mac[6];     /* learned UE MAC (eth_mac_hash key) */
-    bool            eth_mac_learned;
+    ogs_list_t      eth_mac_list;   /* learned device MACs (upf_eth_mac_t) */
 
     ogs_ipsubnet_t   *ipv4_framed_routes;
     ogs_ipsubnet_t   *ipv6_framed_routes;
