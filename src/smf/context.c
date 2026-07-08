@@ -1989,6 +1989,10 @@ uint8_t smf_sess_set_ue_ip(smf_sess_t *sess)
                 sess->ipv4->addr, OGS_IPV4_LEN, sess);
         ogs_hash_set(smf_self()->ipv6_hash,
                 sess->ipv6->addr, OGS_IPV6_DEFAULT_PREFIX_LEN >> 3, sess);
+    } else if (sess->session.session_type == OGS_PDU_SESSION_TYPE_ETHERNET) {
+        /* Ethernet PDU session: no UE IP address is allocated */
+        ogs_info("[%s:%d] Ethernet PDU session: no UE IP allocation",
+                smf_ue->supi, sess->psi);
     } else {
         ogs_fatal("Invalid sess->session.session_type[%d]",
                 sess->session.session_type);
